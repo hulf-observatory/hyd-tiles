@@ -194,11 +194,14 @@ export default {
     const release = parts[1];
     if (!NAME.test(release)) return text('bad release name', 400);
 
-    // Whole file: hand over to GitHub.
+    // Whole file: hand over to GitHub. A layer split into a mosaic has no single file,
+    // so send those to the release page, which lists the parts.
     if (parts.length === 3 && parts[2].endsWith('.pmtiles')) {
       const file = parts[2].slice(0, -'.pmtiles'.length);
       if (!NAME.test(file)) return text('bad file name', 400);
-      return Response.redirect(assetUrl(env, release, file), 302);
+      const head = await fetch(assetUrl(env, release, file), { method: 'HEAD', redirect: 'follow' });
+      if (head.ok) return Response.redirect(assetUrl(env, release, file), 302);
+      return Response.redirect(`https://github.com/${env.GITHUB_REPO}/releases/tag/${release}`, 302);
     }
 
     try {
@@ -221,13 +224,21 @@ export default {
         if (!NAME.test(file) || !Number.isInteger(z) || !Number.isInteger(x) || !m) return text('bad tile path', 400);
         const y = Number(m[1]);
 
-        // Edge cache: a tile of a published release never changes.
+        // Edge cache: a tile of a published release never changes. The key ignores any
+        // query string (so ?v=… variants can't multiply misses) and the ETag lets browsers
+        // revalidate with a 304 instead of a second full download.
+        const etag = `"${release}/${file}/${z}/${x}/${y}.${m[2]}"`;
+        if (request.headers.get('If-None-Match') === etag) return new Response(null, { status: 304, headers: { ETag: etag, ...CORS } });
         const cache = caches.default;
-        const cached = await cache.match(request);
+        const key = new Request(url.origin + url.pathname, { method: 'GET' });
+        const cached = await cache.match(key);
         if (cached) return cached;
 
         const res = await tile(env, release, file, z, x, y, m[2]);
-        if (res.status === 200) ctx.waitUntil(cache.put(request, res.clone()));
+        if (res.status === 200) {
+          res.headers.set('ETag', etag);
+          if (request.method === 'GET') ctx.waitUntil(cache.put(key, res.clone()));
+        }
         return res;
       }
     } catch (e) {
