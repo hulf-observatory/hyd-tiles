@@ -70,7 +70,12 @@ class Mosaic {
       const h = p.h;
       if (z < h.min_zoom || z > h.max_zoom) continue;
       if (s > h.max_lat_e7 || e > h.max_lon_e7 || nn < h.min_lat_e7 || w < h.min_lon_e7) continue;
-      return p.pm.getZxy(z, x, y);
+      try {
+        return await p.pm.getZxy(z, x, y);
+      } catch (err) {
+        pmCache.invalidate(p.pm.source); // don't keep a failed header fetch of this part
+        throw err;
+      }
     }
     return undefined;
   }
@@ -117,9 +122,16 @@ async function open(url) {
     await single.getHeader();
     p = single;
   } catch (e) {
+    // The shared cache keeps rejected header fetches too; drop them so a file that
+    // appears later (e.g. a release published after a probe) is found on retry.
+    pmCache.invalidate(single.source);
     if (!/404|not found/i.test(String(e?.message || e))) throw e;
     p = new Mosaic(url.replace(/\.pmtiles$/, '.mosaic.json'));
-    await p.getHeader(); // throws 404 if neither exists
+    try {
+      await p.getHeader(); // throws 404 if neither exists
+    } catch (e2) {
+      throw e2;
+    }
   }
   openFiles.set(url, p);
   return p;
