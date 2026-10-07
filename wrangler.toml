@@ -1,0 +1,10 @@
+name = "hyd-tiles"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+
+[vars]
+GITHUB_REPO = "hulf-observatory/hyderabad-data"
+
+[observability]
+enabled = true
