@@ -19,6 +19,30 @@ import { PMTiles, SharedPromiseCache, TileType } from 'pmtiles';
 const pmCache = new SharedPromiseCache(100, true);
 const openFiles = new Map(); // url -> PMTiles | Mosaic
 
+// Range reads that bypass Cloudflare's fetch cache. With the default fetch, a range that
+// overlaps bytes already fetched for the header (e.g. a small tile stored just after it)
+// could stall for 40 s inside the cache layer; tiles are cached separately via caches.default.
+class RangeSource {
+  constructor(url) { this.url = url; }
+  getKey() { return this.url; }
+  async getBytes(offset, length, signal, etag) {
+    const headers = { Range: `bytes=${offset}-${offset + length - 1}` };
+    if (etag) headers['If-Match'] = etag;
+    const r = await fetch(this.url, { headers, redirect: 'follow', cache: 'no-store', signal });
+    if (r.status === 416) throw new Error('416: ' + this.url);
+    if (r.status === 412) throw new Error('etag mismatch: ' + this.url);
+    if (r.status === 404) throw new Error('404 not found: ' + this.url);
+    if (r.status === 200) {
+      // the server ignored the range; only acceptable for a small whole file
+      const len = Number(r.headers.get('Content-Length') || 0);
+      if (len > length * 4) { r.body?.cancel(); throw new Error('server ignored Range: ' + this.url); }
+    } else if (r.status !== 206) throw new Error(`${r.status}: ${this.url}`);
+    const data = await r.arrayBuffer();
+    return { data: data.byteLength > length ? data.slice(0, length) : data,
+      etag: r.headers.get('ETag') || undefined, cacheControl: r.headers.get('Cache-Control') || undefined, expires: r.headers.get('Expires') || undefined };
+  }
+}
+
 // A layer over GitHub's 2 GB asset limit is uploaded as <id>.mosaic.json plus
 // <id>-part0000.pmtiles, … (made by pmtiles_mosaic's partition-basic). The mosaic
 // lists each part with the zoom range and bounds it covers; a tile is looked up in
@@ -38,7 +62,7 @@ class Mosaic {
         this.hdr = m.header;
         this.meta = m.metadata || {};
         this.parts = Object.entries(m.slices).map(([key, s]) => ({
-          pm: new PMTiles(new URL(key, this.url).href, pmCache),
+          pm: new PMTiles(new RangeSource(new URL(key, this.url).href), pmCache),
           h: s.header,
         }));
       })();
@@ -117,7 +141,7 @@ function assetUrl(env, release, file) {
 async function open(url) {
   let p = openFiles.get(url);
   if (p) return p;
-  const single = new PMTiles(url, pmCache);
+  const single = new PMTiles(new RangeSource(url), pmCache);
   try {
     await single.getHeader();
     p = single;
