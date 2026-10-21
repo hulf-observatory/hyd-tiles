@@ -8,7 +8,7 @@ so the Worker sits in between: it reads only the bytes a tile needs, caches the
 tile at Cloudflare's edge and returns it with CORS. Nothing is stored here; the
 Releases stay the single home of the data.
 
-Live at **https://hyd-tiles.hulf-observatory.workers.dev** (free plan: 100,000 requests/day).
+Live at **https://tiles.urbanobservatory.in** (Worker route on the `urbanobservatory.in` Cloudflare zone, since 21 Oct 2026; the free Universal certificate covers one subdomain level, so not `tiles.hyderabad.…`) and still at https://hyd-tiles.hulf-observatory.workers.dev (free plan: 100,000 requests/day, shared across both names). Release 2026-10-07's catalogue still points at the workers.dev name; the next `release.py` run writes the new one.
 
 ## URLs
 
