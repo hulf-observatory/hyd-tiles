@@ -1,7 +1,7 @@
 # hyd-tiles
 
 A small Cloudflare Worker that serves map tiles from PMTiles files kept in the
-GitHub Releases of [hulf-observatory/hyderabad-data](https://github.com/hulf-observatory/hyderabad-data).
+GitHub Releases of [hulf-observatory/data](https://github.com/hulf-observatory/data).
 
 Browsers cannot read GitHub Release files directly (GitHub sends no CORS header),
 so the Worker sits in between: it reads only the bytes a tile needs, caches the

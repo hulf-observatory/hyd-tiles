@@ -19,6 +19,10 @@ import { PMTiles, SharedPromiseCache, TileType } from 'pmtiles';
 const pmCache = new SharedPromiseCache(100, true);
 const openFiles = new Map(); // url -> PMTiles | Mosaic
 
+// A GitHub read that has not answered by then is abandoned. Without a limit, one stalled
+// header fetch sat in the shared cache and every later request for that file hung with it.
+const FETCH_TIMEOUT_MS = 15000;
+
 // Range reads that bypass Cloudflare's fetch cache. With the default fetch, a range that
 // overlaps bytes already fetched for the header (e.g. a small tile stored just after it)
 // could stall for 40 s inside the cache layer; tiles are cached separately via caches.default.
@@ -28,7 +32,9 @@ class RangeSource {
   async getBytes(offset, length, signal, etag) {
     const headers = { Range: `bytes=${offset}-${offset + length - 1}` };
     if (etag) headers['If-Match'] = etag;
-    const r = await fetch(this.url, { headers, redirect: 'follow', cache: 'no-store', signal });
+    const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+    const r = await fetch(this.url, { headers, redirect: 'follow', cache: 'no-store',
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
     if (r.status === 416) throw new Error('416: ' + this.url);
     if (r.status === 412) throw new Error('etag mismatch: ' + this.url);
     if (r.status === 404) throw new Error('404 not found: ' + this.url);
@@ -161,6 +167,27 @@ async function open(url) {
   return p;
 }
 
+// Drop everything cached for a file after a failed read. The shared cache keeps rejected
+// promises (header and directories), which would otherwise fail every later request for
+// the file in this isolate. Keys start with the file's URL (mosaic parts with its stem).
+function forget(url) {
+  openFiles.delete(url);
+  const stem = url.replace(/\.pmtiles$/, '');
+  for (const k of [...pmCache.cache.keys()]) if (k.startsWith(stem)) pmCache.cache.delete(k);
+}
+
+// One retry with a clean cache for anything but a missing file: GitHub's release
+// downloads occasionally stall or fail once and then answer normally.
+async function withRetry(env, release, file, fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    if (/404|not found/i.test(String(e?.message || e))) throw e;
+    forget(assetUrl(env, release, file));
+    return await fn();
+  }
+}
+
 async function tileJSON(env, release, file, origin) {
   const p = await open(assetUrl(env, release, file));
   const [h, meta] = await Promise.all([p.getHeader(), p.getMetadata()]);
@@ -233,7 +260,7 @@ export default {
       if (parts.length === 3 && parts[2].endsWith('.json')) {
         const file = parts[2].slice(0, -'.json'.length);
         if (!NAME.test(file)) return text('bad file name', 400);
-        const body = JSON.stringify(await tileJSON(env, release, file, url.origin));
+        const body = JSON.stringify(await withRetry(env, release, file, () => tileJSON(env, release, file, url.origin)));
         return new Response(body, {
           headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600', ...CORS },
         });
@@ -258,7 +285,7 @@ export default {
         const cached = await cache.match(key);
         if (cached) return cached;
 
-        const res = await tile(env, release, file, z, x, y, m[2]);
+        const res = await withRetry(env, release, file, () => tile(env, release, file, z, x, y, m[2]));
         if (res.status === 200) {
           res.headers.set('ETag', etag);
           if (request.method === 'GET') ctx.waitUntil(cache.put(key, res.clone()));
@@ -269,7 +296,8 @@ export default {
       // pmtiles throws on 404 from GitHub (missing release/file) and on non-PMTiles bytes.
       const msg = String(e?.message || e);
       if (/404|not found/i.test(msg)) return text('no such release or file', 404);
-      if (/magic|header|pmtiles/i.test(msg)) return text('not a PMTiles file', 415);
+      // (match the library's own message only: upstream errors carry the .pmtiles URL)
+      if (/wrong magic number/i.test(msg)) return text('not a PMTiles file', 415);
       return text('upstream error: ' + msg, 502);
     }
 
